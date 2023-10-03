@@ -9,7 +9,7 @@ const crypto = require("crypto");
 const passport = require("passport");
 const pool = require("./db");
 
-const { S3Client, GetObjectCommand } = require("@aws-sdk/client-s3");
+const { S3Client, GetObjectCommand, DeleteObjectCommand } = require("@aws-sdk/client-s3");
 const { getSignedUrl } = require("@aws-sdk/s3-request-presigner");
 const { Upload } = require("@aws-sdk/lib-storage");
 
@@ -67,48 +67,90 @@ app.use("/notAuthenticated", (req, res) => {
     res.send("NOT AUTHENTICATED");
 })
 
-
 // Create/upload user image
 app.post("/fotos", ensureAuthenticated, upload.single("image"), async (req, res) => {
     console.log(req.body);
     console.log(req.file);
+
+    if (!req.file.buffer) {
+        res.status(400).send({ error: "No File Selected" })
+    }
+
     console.log(req.file.buffer);
 
     let fileExtension = req.file.mimetype.split("/")[1];
-    const imageName = generateImageName() + "." + fileExtension;
+    const imageName = generateImageName();
 
-    const query = await pool.query("INSERT INTO fotos (image_name, description, author_id) VALUES ($1, $2, $3)", [
+    // Insert image into DB
+    let query = await pool.query("INSERT INTO fotos (image_name, description, author_id, image_ext, title) VALUES ($1, $2, $3, $4, $5)", [
         imageName,
-        "",
-        req.user.user_id
+        req.body.description,
+        req.user.user_id,
+        fileExtension,
+        req.body.title
     ]);
 
+    // Upload to S3 bucket
     const upload = new Upload({
         client: s3,
         params: {
             Bucket: process.env.BUCKET_NAME,
-            Key: imageName,
+            Key: imageName + "." + fileExtension,
             Body: req.file.buffer,
         }
     });
 
     await upload.done();
-    res.send({});
+    res.send({ imageName: imageName });
 })
 
 // Update user image
 app.put("/fotos/:name", ensureAuthenticated, (req, res) => {
-
+    // Implement Update
+    res.send({});
 })
 
 // Delete user image
-app.delete("/fotos/:name", ensureAuthenticated, (req, res) => {
+app.delete("/fotos/:name", ensureAuthenticated, async (req, res) => {
+    const query = await pool.query("SELECT * FROM fotos WHERE image_name = $1 AND author_id = $2", [
+        req.params.name,
+        req.user.user_id
+    ]);
 
+    const command = new DeleteObjectCommand({
+        Bucket: process.env.BUCKET_NAME,
+        Key: req.params.name + "." + query.rows[0].image_ext
+    });
+    await s3.send(command);
+
+    await pool.query("DELETE FROM fotos WHERE image_name = $1 AND author_id = $2", [
+        req.params.name,
+        req.user.user_id
+    ]);
+
+    res.send(query.rows[0]);
 })
 
 // Get singular image
-app.get("/fotos/:name", ensureAuthenticated, (req, res) => {
+app.get("/fotos/:name", ensureAuthenticated, async (req, res) => {
+    // Query Image by name and author id
+    let query = await pool.query("SELECT * FROM fotos WHERE image_name = $1 AND author_id = $2", [
+        req.params.name,
+        req.user.user_id
+    ]);
 
+    if (query.rows.length === 0) {
+        res.status(404).send({ error: "Image does not exist" });
+        return;
+    }
+
+    const command = new GetObjectCommand({
+        Bucket: process.env.BUCKET_NAME,
+        Key: req.params.name + "." + query.rows[0].image_ext
+    });
+    query.rows[0].imageURL = await getSignedUrl(s3, command, { expiresIn: 3600 });
+
+    res.send(query.rows[0]);
 })
 
 // Get all user images
@@ -122,7 +164,7 @@ app.get("/fotos", ensureAuthenticated, async (req, res) => {
     for (let foto of query.rows) {
         const command = new GetObjectCommand({
             Bucket: process.env.BUCKET_NAME,
-            Key: foto.image_name
+            Key: foto.image_name + "." + foto.image_ext
         });
         const url = await getSignedUrl(s3, command, { expiresIn: 3600 });
 
