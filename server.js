@@ -14,12 +14,13 @@ const { getSignedUrl } = require("@aws-sdk/s3-request-presigner");
 const { Upload } = require("@aws-sdk/lib-storage");
 
 const app = express();
+app.use(express.json());
 
 function ensureAuthenticated(req, res, next) {
     if (req.isAuthenticated()) {
         return next();
     } else {
-        res.redirect("/notAuthenticated");
+        res.redirect("http://localhost:5173/login");
     }
 }
 
@@ -63,10 +64,6 @@ app.use("/user", ensureAuthenticated, async (req, res) => {
     res.json(query.rows[0]);
 });
 
-app.use("/notAuthenticated", (req, res) => {
-    res.send("NOT AUTHENTICATED");
-})
-
 // Create/upload user image
 app.post("/fotos", ensureAuthenticated, upload.single("image"), async (req, res) => {
     console.log(req.body);
@@ -76,13 +73,11 @@ app.post("/fotos", ensureAuthenticated, upload.single("image"), async (req, res)
         res.status(400).send({ error: "No File Selected" })
     }
 
-    console.log(req.file.buffer);
-
     let fileExtension = req.file.mimetype.split("/")[1];
     const imageName = generateImageName();
 
     // Insert image into DB
-    let query = await pool.query("INSERT INTO fotos (image_name, description, author_id, image_ext, title) VALUES ($1, $2, $3, $4, $5)", [
+    await pool.query("INSERT INTO fotos (image_name, description, author_id, image_ext, title) VALUES ($1, $2, $3, $4, $5)", [
         imageName,
         req.body.description,
         req.user.user_id,
@@ -105,8 +100,18 @@ app.post("/fotos", ensureAuthenticated, upload.single("image"), async (req, res)
 })
 
 // Update user image
-app.put("/fotos/:name", ensureAuthenticated, (req, res) => {
-    // Implement Update
+app.put("/fotos/:name", ensureAuthenticated, async (req, res) => {
+    if (!req.body.title || !req.body.description) {
+        res.status(404).send({ error: "Missing title and/or description" });
+    }
+
+    const query = await pool.query("UPDATE fotos SET title = $1, description = $2 WHERE image_name = $3 AND author_id = $4", [
+        req.body.title,
+        req.body.description,
+        req.params.name,
+        req.user.user_id
+    ]);
+
     res.send({});
 })
 
